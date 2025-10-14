@@ -510,5 +510,162 @@
                 has been engineered, by: Charles Stewart, of Coleman Texas. ... Last up-dated: June-2025.</p>
         </div>
     </footer>
+    <script>
+/* ===== API helpers ===== */
+const API_BASE = (location.hostname === "localhost") ? "http://localhost:8081/api/v1" : "/api/v1";
+const alertBox = document.getElementById("alert");
+let profileExists = false;
+let original = {};
+
+function showMsg(msg, kind="success"){ alertBox.textContent = msg; alertBox.className = `helper ${kind}`; }
+function getToken(){ return localStorage.getItem("jwt") || ""; }
+async function api(path, {method="GET", body} = {}){
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers: {
+      "Accept": "application/json",
+      ...(method !== "GET" ? {"Content-Type": "application/json"} : {}),
+      "Authorization": `Bearer ${getToken()}`
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (res.status === 404) return { _404: true };
+  if (!res.ok){
+    const t = await res.text().catch(()=> "");
+    throw new Error(`${method} ${path} ${res.status} ${t}`);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : {};
+}
+
+/* ===== DOM utils ===== */
+const val = id => (document.getElementById(id)?.value || "").trim();
+const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ""; };
+function getRadio(name){
+  const el = document.querySelector(`input[name="${name}"]:checked`);
+  return el ? el.value : null;
+}
+function setRadio(name, value){
+  if (!value) return;
+  const el = document.querySelector(`input[name="${name}"][value="${value}"]`);
+  if (el) el.checked = true;
+}
+
+/* ===== mapping functions ===== */
+function buildBirthday(){
+  const y = val("birthYear"), m = val("birthMonth"), d = val("birthDay");
+  if (!y || !m || !d) return "";
+  const mm = String(Number(m)).padStart(2,"0");
+  const dd = String(Number(d)).padStart(2,"0");
+  return `${y}-${mm}-${dd}`;
+}
+function hydrateBirthday(iso){
+  if (!iso) return;
+  const [y,m,d] = iso.split("-");
+  setVal("birthYear", y || "");
+  setVal("birthMonth", (m||"").replace(/^0/,""));
+  setVal("birthDay", (d||"").replace(/^0/,""));
+}
+function fullNameFromForm(){
+  return [val("firstName"), val("middleName"), val("lastName")].filter(Boolean).join(" ");
+}
+function emailsArray(){
+  return [val("email2"), val("email3")].filter(Boolean);
+}
+
+/* ===== load identity + profile info ===== */
+async function loadIdentity(){
+  try{
+    const u = await api("/profile", { method:"GET" }); // from auth handler
+    if (!u._404){
+      setVal("username", u.username || "");
+      setVal("email", u.email || "");
+    }
+  }catch{ /* not fatal */ }
+}
+async function loadProfileInfo(){
+  const token = getToken();
+  if(!token){ showMsg("Not logged in. Please log in to view/edit your profile.", "error"); return; }
+  await loadIdentity();
+  try{
+    const p = await api("/profile/info", { method:"GET" });
+    if (p._404){
+      profileExists = false;
+      original = {};
+      showMsg("No profile info yet. Fill the form and save to create it.");
+      return;
+    }
+    profileExists = true;
+    original = p;
+    // map server → form
+    if (p.full_name){
+      const parts = String(p.full_name).split(" ");
+      setVal("firstName", parts[0] || "");
+      setVal("middleName", parts.length > 2 ? parts.slice(1,-1).join(" ") : "");
+      setVal("lastName", parts.length > 1 ? parts[parts.length-1] : "");
+    }
+    hydrateBirthday(p.birthday);
+    setRadio("gender", p.gender || null);
+    setVal("mothersMaidenName", p.mothers_maiden_name || "");
+    setVal("phone1", p.phone_number || "");
+    if (Array.isArray(p.additional_emails)){
+      setVal("email2", p.additional_emails[0] || "");
+      setVal("email3", p.additional_emails[1] || "");
+    }
+    showMsg("Profile info loaded.");
+  }catch(err){
+    console.error(err);
+    showMsg("Failed to load profile info.", "error");
+  }
+}
+document.addEventListener("DOMContentLoaded", loadProfileInfo);
+
+/* ===== submit create/update ===== */
+document.getElementById("profileInfoForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try{
+    if (!profileExists){
+      const payload = {
+        full_name: fullNameFromForm() || null,
+        birthday: buildBirthday() || "",
+        gender: getRadio("gender"),
+        mothers_maiden_name: val("mothersMaidenName") || null,
+        phone_number: val("phone1") || null,
+        additional_emails: emailsArray()
+      };
+      const result = await api("/profile/info", { method:"POST", body: payload });
+      profileExists = true; original = result || {};
+      showMsg("Profile info created successfully.");
+    } else {
+      const next = {
+        full_name: fullNameFromForm() || null,
+        birthday: buildBirthday() || "",
+        gender: getRadio("gender"),
+        mothers_maiden_name: val("mothersMaidenName") || null,
+        phone_number: val("phone1") || null,
+        additional_emails: emailsArray()
+      };
+      const patch = {};
+      if ((next.full_name||null) !== (original.full_name||null)) patch.full_name = next.full_name;
+      if ((next.birthday||"") !== (original.birthday||"")) patch.birthday = next.birthday || null;
+      if ((next.gender||null) !== (original.gender||null)) patch.gender = next.gender || null;
+      if ((next.mothers_maiden_name||null) !== (original.mothers_maiden_name||null)) patch.mothers_maiden_name = next.mothers_maiden_name;
+      if ((next.phone_number||null) !== (original.phone_number||null)) patch.phone_number = next.phone_number;
+      const a = Array.isArray(next.additional_emails)?next.additional_emails:[], b = Array.isArray(original.additional_emails)?original.additional_emails:[];
+      const arraysEqual = (a.length===b.length) && a.every((v,i)=>v===b[i]);
+      if (!arraysEqual) patch.additional_emails = a;
+
+      if (Object.keys(patch).length === 0){ showMsg("No changes to save."); return; }
+
+      const result = await api("/profile/info", { method:"PUT", body: patch });
+      original = result || original;
+      showMsg("Profile info updated successfully.");
+    }
+  }catch(err){
+    console.error(err);
+    showMsg("Save failed. Please review your entries and try again.", "error");
+  }
+});
+</script>
 </body>
 </html>
