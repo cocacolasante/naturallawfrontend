@@ -527,6 +527,146 @@
                 has been engineered, by: Charles Stewart, of Coleman Texas. ... Last up-dated: June-2025.</p>
         </div>
     </footer>
+    <script>
+(() => {
+  // --- config ---
+  // Change this if your API is on a different origin:
+  const API_BASE = (document.body.dataset.apiBase || '').replace(/\/+$/, '') || '/api/v1';
+
+  // Try several common token keys so you don't get stuck on naming differences.
+  function getAuthToken() {
+    return (
+      localStorage.getItem('authToken') ||
+      localStorage.getItem('token') ||
+      localStorage.getItem('jwt') ||
+      ''
+    );
+  }
+
+  // Grab the address form. On this page, it's the second <form>.
+  const forms = Array.from(document.querySelectorAll('form'));
+  if (!forms.length) return;
+  const addressForm = forms[forms.length - 1]; // last form is the detailed USA address form
+
+  // Helper: split "123 Main St Apt 4" -> { number: "123", name: "Main St Apt 4" }
+  function splitStreet(raw) {
+    if (!raw) return { number: undefined, name: undefined };
+    const trimmed = raw.trim();
+    const m = trimmed.match(/^(\d+)\s+(.*)$/);
+    if (m) return { number: m[1], name: m[2] };
+    // No leading number — send everything as street_name
+    return { number: undefined, name: trimmed };
+  }
+
+  // Build JSON payload with only non-empty fields the backend accepts
+  function buildAddressPayload() {
+    const state = document.getElementById('state')?.value?.trim() || '';
+    const street = document.getElementById('street')?.value?.trim() || '';
+    const city = document.getElementById('city')?.value?.trim() || '';
+    const zipcode = document.getElementById('zipcode')?.value?.trim() || '';
+    const pobox = document.getElementById('pobox')?.value?.trim() || '';
+
+    const { number: street_number, name: street_name } = splitStreet(street);
+
+    const body = {};
+    if (street_number) body.street_number = street_number;
+    if (street_name) body.street_name = street_name;
+    if (pobox) body.address_line_2 = pobox;      // maps to "address_line_2"
+    if (city) body.city = city;
+    if (state) body.state = state;
+    if (zipcode) body.zip_code = zipcode;
+
+    return body;
+  }
+
+  // Minimal UI feedback
+  function toast(msg, isError = false) {
+    let el = document.getElementById('profile-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'profile-toast';
+      el.style.position = 'fixed';
+      el.style.left = '50%';
+      el.style.top = '20px';
+      el.style.transform = 'translateX(-50%)';
+      el.style.zIndex = '99999';
+      el.style.padding = '10px 14px';
+      el.style.borderRadius = '8px';
+      el.style.boxShadow = '0 2px 8px rgba(0,0,0,0.4)';
+      el.style.fontWeight = 'bold';
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.style.background = isError ? '#7a1f1f' : '#2a4';
+    el.style.color = '#fff';
+    clearTimeout(el._t);
+    el._t = setTimeout(() => (el.style.display = 'none'), 4000);
+    el.style.display = 'block';
+  }
+
+  async function authedFetch(url, options = {}) {
+    const token = getAuthToken();
+    if (!token) {
+      throw new Error('No auth token found in localStorage (authToken/token/jwt).');
+    }
+    const headers = new Headers(options.headers || {});
+    headers.set('Content-Type', 'application/json');
+    headers.set('Authorization', `Bearer ${token}`);
+    return fetch(url, { ...options, headers });
+  }
+
+  async function submitAddressUpdate(evt) {
+    evt.preventDefault();
+
+    const payload = buildAddressPayload();
+    if (Object.keys(payload).length === 0) {
+      toast('No address fields to update.', true);
+      return;
+    }
+
+    const putUrl = `${API_BASE}/profile/address`;
+    try {
+      // Try UPDATE first
+      let res = await authedFetch(putUrl, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+
+      if (res.status === 404) {
+        // No existing address row — create it
+        res = await authedFetch(putUrl, {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      }
+
+      if (res.status === 401) {
+        toast('Unauthorized. Please log in again.', true);
+        return;
+      }
+
+      if (!res.ok) {
+        const err = await safeJson(res);
+        throw new Error(err?.error || `Request failed (${res.status})`);
+      }
+
+      const data = await res.json();
+      // You can also reflect returned data back into the form if desired.
+      toast('Address saved successfully.');
+      // console.log('Saved address:', data);
+    } catch (e) {
+      toast(`Save failed: ${e.message}`, true);
+    }
+  }
+
+  async function safeJson(res) {
+    try { return await res.json(); } catch { return null; }
+  }
+
+  addressForm.addEventListener('submit', submitAddressUpdate);
+})();
+</script>
+
 </body>
 </html>
 

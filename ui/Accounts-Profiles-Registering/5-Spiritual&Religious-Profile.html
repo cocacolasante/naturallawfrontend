@@ -780,6 +780,206 @@ body {
 
     </form>
 </div>
+<script>
+(() => {
+  // ===== Config =====
+  const API_BASE = (document.body.dataset.apiBase || '').replace(/\/+$/, '') || '/api/v1';
+  const ENDPOINT = `${API_BASE}/profile/religious`; // matches your existing backend
+
+  // ===== Utilities =====
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+
+  function getAuthToken() {
+    return (
+      localStorage.getItem('authToken') ||
+      localStorage.getItem('token') ||
+      localStorage.getItem('jwt') ||
+      ''
+    );
+  }
+
+  async function authedFetch(url, options = {}) {
+    const token = getAuthToken();
+    if (!token) throw new Error('No auth token found (authToken/token/jwt in localStorage).');
+    const headers = new Headers(options.headers || {});
+    if (!(options.body instanceof FormData)) headers.set('Content-Type', 'application/json');
+    headers.set('Authorization', `Bearer ${token}`);
+    return fetch(url, { ...options, headers });
+  }
+
+  function toast(msg, isError = false) {
+    let el = document.getElementById('relig-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'relig-toast';
+      Object.assign(el.style, {
+        position: 'fixed', left: '50%', top: '20px', transform: 'translateX(-50%)',
+        zIndex: 99999, padding: '10px 14px', borderRadius: '8px',
+        boxShadow: '0 2px 8px rgba(0,0,0,.4)', fontWeight: 'bold', color: '#fff'
+      });
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.style.background = isError ? '#7a1f1f' : '#2a4';
+    clearTimeout(el._t);
+    el.style.display = 'block';
+    el._t = setTimeout(() => (el.style.display = 'none'), 4000);
+  }
+
+  // Map UI practiceLevel ↔ numeric 0–10 expected by backend (supporting_religion)
+  const PRACTICE_TO_SCORE = {
+    'very-active': 9,
+    'moderately-active': 7,
+    'occasionally-active': 5,
+    'cultural': 4,
+    'studying': 3,
+    'inactive': 1
+  };
+  function scoreToPracticeLevel(score) {
+    if (score == null) return '';
+    // snap to nearest bucket
+    const pairs = Object.entries(PRACTICE_TO_SCORE);
+    let best = ['', Infinity];
+    for (const [k, v] of pairs) {
+      const d = Math.abs((+score || 0) - v);
+      if (d < best[1]) best = [k, d];
+    }
+    return best[0];
+  }
+
+  // Known radio values in the form
+  const KNOWN_RELIGIONS = new Set([
+    'folk','hinduism','buddhism','islam-sunni','islam-shiah',
+    'roman-catholic','church-england','rabbinical-judaism','lutheran',
+    'baptist','jehovahs-witnesses','lds-mormon','other','none'
+  ]);
+
+  function collectPayload() {
+    const selectedRadio = $('input[name="primaryReligion"]:checked');
+    let religion = selectedRadio ? selectedRadio.value : '';
+
+    // If "other" selected, use free text; also append denomination if provided
+    const other = $('#otherReligion')?.value?.trim() || '';
+    const denom = $('#denomination')?.value?.trim() || '';
+
+    // Compose religion string for backend (single text field)
+    if (religion === 'other') {
+      religion = other || 'other';
+    }
+    if (denom) {
+      // preserve base + denomination
+      religion = religion ? `${religion} - ${denom}` : denom;
+    }
+
+    const practiceLevel = $('#practiceLevel')?.value || '';
+    const supporting_religion = PRACTICE_TO_SCORE[practiceLevel] ?? null;
+
+    // Array of selected interests maps to religious_services_types (string[])
+    const services = $$('input[name="communityInterests[]"]:checked').map(cb => cb.value);
+
+    // NOTE: backend structure supports: religion (string), supporting_religion (0-10), religious_services_types (text[])
+    return {
+      religion: religion || '',
+      supporting_religion, // number or null
+      religious_services_types: services
+    };
+  }
+
+  function prefillForm(api) {
+    if (!api || typeof api !== 'object') return;
+
+    // religion: try to match one of the radios; if not, set "other" and fill otherReligion
+    const rel = String(api.religion ?? '').trim();
+    let baseRel = rel;
+    let denom = '';
+
+    // If composed like "roman-catholic - Jesuits", split on first " - "
+    const splitIdx = rel.indexOf(' - ');
+    if (splitIdx !== -1) {
+      baseRel = rel.slice(0, splitIdx);
+      denom = rel.slice(splitIdx + 3);
+    }
+
+    // If the base value isn't one of the radio values, treat as "other"
+    const radioValue = KNOWN_RELIGIONS.has(baseRel) ? baseRel : 'other';
+    const radio = document.querySelector(`input[name="primaryReligion"][value="${radioValue}"]`);
+    if (radio) radio.checked = true;
+
+    if (radioValue === 'other') {
+      if ($('#otherReligion')) $('#otherReligion').value = rel || '';
+    }
+    if (denom && $('#denomination')) $('#denomination').value = denom;
+
+    // supporting_religion → practiceLevel select
+    const practice = scoreToPracticeLevel(api.supporting_religion);
+    if ($('#practiceLevel')) $('#practiceLevel').value = practice;
+
+    // religious_services_types → checkboxes
+    const types = Array.isArray(api.religious_services_types) ? api.religious_services_types : [];
+    types.forEach(val => {
+      const cb = document.querySelector(`input[name="communityInterests[]"][value="${val}"]`);
+      if (cb) cb.checked = true;
+    });
+  }
+
+  async function safeJson(res) {
+    try { return await res.json(); } catch { return null; }
+  }
+
+  async function loadExisting() {
+    try {
+      const res = await authedFetch(ENDPOINT, { method: 'GET' });
+      if (res.status === 404) return; // nothing yet
+      if (!res.ok) return;
+      const data = await res.json();
+      prefillForm(data);
+    } catch (e) {
+      if (/No auth token/i.test(String(e?.message))) toast(e.message, true);
+    }
+  }
+
+  async function submitHandler(e) {
+    e.preventDefault();
+    const payload = collectPayload();
+
+    try {
+      // Try update first
+      let res = await authedFetch(ENDPOINT, {
+        method: 'PUT',
+        body: JSON.stringify(payload)
+      });
+
+      if (res.status === 404) {
+        // Create if none exists
+        res = await authedFetch(ENDPOINT, {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+      }
+
+      if (res.status === 401) {
+        toast('Unauthorized. Please log in again.', true);
+        return;
+      }
+
+      if (!res.ok) {
+        const err = await safeJson(res);
+        throw new Error(err?.error || `Request failed (${res.status})`);
+      }
+
+      toast('Religious profile saved.');
+    } catch (err) {
+      toast(`Save failed: ${err.message}`, true);
+    }
+  }
+
+  const form = document.querySelector('form.registration-form');
+  if (!form) return;
+  form.addEventListener('submit', submitHandler);
+  loadExisting();
+})();
+</script>
 
 </body>
 </html>

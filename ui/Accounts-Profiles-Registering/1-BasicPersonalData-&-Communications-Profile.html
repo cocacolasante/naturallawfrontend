@@ -661,6 +661,7 @@ document.getElementById("profileInfoForm").addEventListener("submit", async (e) 
       original = result || original;
       showMsg("Profile info updated successfully.");
     }
+    
   }catch(err){
     console.error(err);
     showMsg("Save failed. Please review your entries and try again.", "error");
